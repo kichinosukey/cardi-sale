@@ -236,6 +236,8 @@ crontabを編集してスケジュールを設定します：
 crontab -e
 ```
 
+##### 通常の実行方法（システムのPythonを使用）
+
 以下のような設定を追加します（毎日午前8時に実行する例）：
 
 ```bash
@@ -243,10 +245,29 @@ crontab -e
 0 8 * * * cd /home/pi/cardi-sale && python src/scraper.py --notify >> /home/pi/cardi-sale/logs/cron.log 2>&1
 ```
 
+##### 仮想環境を使用する場合
+
+仮想環境を使っている場合は、以下のいずれかの方法で設定します：
+
+**方法1: 仮想環境のPythonを直接指定**
+
+```bash
+# 仮想環境のPythonを使用して実行
+0 8 * * * cd /home/pi/cardi-sale && /home/pi/cardi-sale/venv/bin/python src/scraper.py --notify >> /home/pi/cardi-sale/logs/cron.log 2>&1
+```
+
+**方法2: 仮想環境をアクティベートしてから実行**
+
+```bash
+# 仮想環境をアクティベートしてから実行
+0 8 * * * cd /home/pi/cardi-sale && source venv/bin/activate && python src/scraper.py --notify >> /home/pi/cardi-sale/logs/cron.log 2>&1
+```
+
 **注意事項**:
-- パスは実際のインストール場所に合わせて調整してください
+- パスは実際のインストール場所と仮想環境の場所に合わせて調整してください
 - `python` コマンドがPython 3を指していることを確認してください（必要に応じて `python3` に変更）
 - `>> /home/pi/cardi-sale/logs/cron.log 2>&1` で実行結果とエラーをログファイルに記録します
+- 方法1の方がより確実です（環境変数の問題が発生しにくい）
 
 #### 3. 動作確認
 
@@ -278,8 +299,14 @@ tail -f /home/pi/cardi-sale/logs/cron.log
 ### その他のLinuxでのcron設定例
 
 ```bash
-# 毎日午前9時に実行
-0 9 * * * cd /path/to/cardi && python src/scraper.py --notify
+# 基本的な設定（毎日午前9時に実行）
+0 9 * * * cd /path/to/cardi-sale && python src/scraper.py --notify
+
+# 仮想環境を使う場合
+0 9 * * * cd /path/to/cardi-sale && /path/to/cardi-sale/venv/bin/python src/scraper.py --notify
+
+# デバッグモードで実行（より詳細なログを出力）
+0 9 * * * cd /path/to/cardi-sale && python src/scraper.py --notify --debug >> /path/to/cardi-sale/logs/cron.log 2>&1
 ```
 
 ### Windowsでのタスクスケジューラ設定
