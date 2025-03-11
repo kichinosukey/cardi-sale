@@ -1,5 +1,7 @@
 import os
 import re
+import json
+import hashlib
 import datetime
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -8,7 +10,7 @@ from discord_webhook import DiscordWebhook
 from dotenv import load_dotenv
 
 class KaldiSaleScraper:
-    def __init__(self, html_dir, target_shops=None, webhook_url=None, debug=False):
+    def __init__(self, html_dir, target_shops=None, webhook_url=None, debug=False, history_file=None):
         """
         初期化
         
@@ -17,14 +19,17 @@ class KaldiSaleScraper:
             target_shops: 対象店舗リスト（Noneの場合は全店舗）
             webhook_url: Discord Webhook URL
             debug: デバッグモードフラグ
+            history_file: 通知履歴を保存するファイルパス
         """
         self.html_dir = Path(html_dir)
         self.target_shops = target_shops
         self.webhook_url = webhook_url
         self.debug = debug
+        self.history_file = Path(history_file) if history_file else Path("./data/notification_history.json")
         
         # ディレクトリがなければ作成
         os.makedirs(self.html_dir, exist_ok=True)
+        os.makedirs(self.history_file.parent, exist_ok=True)
     
     def get_kaldi_url(self):
         """
@@ -39,12 +44,50 @@ class KaldiSaleScraper:
         url = f"https://map.kaldi.co.jp/kaldi/articleList?account=kaldi&accmd=1&ftop=1&kkw001={today}"
         return url
         
-    def fetch_and_save_html(self, url=None):
+    def get_date_from_url(self, url):
+        """URLから日付を抽出する
+        
+        Args:
+            url: 解析するURL
+            
+        Returns:
+            YYYYMMDD形式の日付文字列、または抽出できない場合はNone
+        """
+        try:
+            # URLから日付部分を抽出（形式: yyyy-MM-dd）
+            match = re.search(r'kkw001=(\d{4}-\d{2}-\d{2})', url)
+            if match:
+                date_str = match.group(1)
+                # ハイフンを除去してYYYYMMDD形式に変換
+                return date_str.replace('-', '')
+            return None
+        except Exception:
+            return None
+    
+    def find_html_by_date(self, date):
+        """指定日付のHTMLファイルを探す
+        
+        Args:
+            date: YYYYMMDD形式の日付文字列
+            
+        Returns:
+            見つかったファイルパス、または見つからない場合はNone
+        """
+        # 日付を含むHTMLファイルを検索
+        pattern = f"kaldi_sale_{date}*.html"
+        for html_file in self.html_dir.glob(pattern):
+            if self.debug:
+                print(f"同じ日付の既存HTMLファイルを発見: {html_file}")
+            return html_file
+        return None
+    
+    def fetch_and_save_html(self, url=None, force_fetch=False):
         """
         指定URLからHTMLを取得して保存
         
         Args:
             url: 取得するURL（Noneの場合は自動生成）
+            force_fetch: 既存ファイルがあっても強制的に取得するフラグ
             
         Returns:
             保存したファイルパス
@@ -54,7 +97,16 @@ class KaldiSaleScraper:
             if url is None:
                 url = self.get_kaldi_url()
                 print(f"自動生成したURLを使用します: {url}")
-                
+            
+            # URLから日付を抽出
+            date = self.get_date_from_url(url)
+            if date and not force_fetch:
+                # 同じ日付のHTMLファイルを探す
+                existing_file = self.find_html_by_date(date)
+                if existing_file:
+                    print(f"同じ日付({date})のHTMLファイルが既に存在します: {existing_file}")
+                    return existing_file
+            
             # リクエストヘッダー（Webサイトによっては必要）
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -73,9 +125,11 @@ class KaldiSaleScraper:
                 print(f"レスポンスヘッダー: {response.headers}")
                 print(f"HTML長さ: {len(response.text)} バイト")
             
-            # 現在日時をファイル名に使用
+            # 日付をファイル名に含める
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"kaldi_sale_{timestamp}.html"
+            # 日付情報が取得できた場合はそれを使う
+            prefix = date if date else timestamp[:8]
+            filename = f"kaldi_sale_{prefix}_{timestamp[9:]}.html"
             filepath = self.html_dir / filename
             
             # HTMLをファイルに保存
@@ -209,6 +263,10 @@ class KaldiSaleScraper:
         if not sales_info:
             return False
         
+        # 出力ディレクトリを確保
+        output_path = Path(output_file)
+        os.makedirs(output_path.parent, exist_ok=True)
+        
         with open(output_file, "w", encoding="utf-8") as f:
             for sale in sales_info:
                 message = self.format_sale_message(sale)
@@ -217,8 +275,131 @@ class KaldiSaleScraper:
         
         return True
         
-    def notify_discord(self, sales_info):
-        """Discord Webhookを使用してセール情報を通知"""
+    def generate_sale_id(self, sale):
+        """セール情報のユニークID生成
+        
+        Args:
+            sale: セール情報辞書
+            
+        Returns:
+            セールのユニークID
+        """
+        # 重要なフィールドを連結してハッシュを生成
+        key_fields = [
+            sale.get('shop', ''),
+            sale.get('title', ''),
+            sale.get('date', ''),
+            sale.get('detail', '')
+        ]
+        
+        hash_string = "|".join(key_fields)
+        # SHA256ハッシュを生成して16進数文字列で返す
+        return hashlib.sha256(hash_string.encode('utf-8')).hexdigest()
+    
+    def load_notification_history(self):
+        """通知履歴の読み込み
+        
+        Returns:
+            通知履歴の辞書（セールID: 通知日時）
+        """
+        if not self.history_file.exists():
+            if self.debug:
+                print(f"履歴ファイルが存在しません: {self.history_file}")
+            return {}
+            
+        try:
+            with open(self.history_file, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+                
+            if self.debug:
+                print(f"通知履歴を読み込みました: {len(history)}件")
+                
+            return history
+        except (json.JSONDecodeError, IOError) as e:
+            if self.debug:
+                print(f"履歴ファイルの読み込みエラー: {e}")
+            return {}
+    
+    def save_notification_history(self, history):
+        """通知履歴の保存
+        
+        Args:
+            history: 保存する通知履歴辞書
+        """
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+                
+            if self.debug:
+                print(f"通知履歴を保存しました: {len(history)}件")
+                
+        except IOError as e:
+            if self.debug:
+                print(f"履歴ファイルの保存エラー: {e}")
+    
+    def filter_new_sales(self, sales_info):
+        """新しいセール情報のみをフィルタリング
+        
+        Args:
+            sales_info: 全セール情報リスト
+            
+        Returns:
+            未通知のセール情報リスト
+        """
+        # 通知履歴を読み込む
+        history = self.load_notification_history()
+        
+        # 新しいセール情報をフィルタリング
+        new_sales = []
+        for sale in sales_info:
+            sale_id = self.generate_sale_id(sale)
+            
+            # 履歴にないセール情報のみを追加
+            if sale_id not in history:
+                new_sales.append(sale)
+                if self.debug:
+                    print(f"新しいセール情報: {sale.get('shop')} - {sale.get('title')}")
+            else:
+                if self.debug:
+                    print(f"既に通知済み: {sale.get('shop')} - {sale.get('title')}")
+        
+        return new_sales
+    
+    def update_notification_history(self, sales_info):
+        """セール情報を通知履歴に追加
+        
+        Args:
+            sales_info: 通知したセール情報リスト
+        """
+        # 通知履歴を読み込む
+        history = self.load_notification_history()
+        
+        # 現在の日時
+        now = datetime.datetime.now().isoformat()
+        
+        # 新しい通知を履歴に追加
+        for sale in sales_info:
+            sale_id = self.generate_sale_id(sale)
+            history[sale_id] = {
+                "notified_at": now,
+                "shop": sale.get('shop', ''),
+                "title": sale.get('title', ''),
+                "date": sale.get('date', '')
+            }
+        
+        # 履歴を保存
+        self.save_notification_history(history)
+    
+    def notify_discord(self, sales_info, update_history=False):
+        """Discord Webhookを使用してセール情報を通知
+        
+        Args:
+            sales_info: 通知するセール情報リスト
+            update_history: 通知履歴を更新するかどうか
+        
+        Returns:
+            通知成功の場合はTrue
+        """
         if not self.webhook_url or not sales_info:
             if self.debug:
                 if not self.webhook_url:
@@ -250,6 +431,12 @@ class KaldiSaleScraper:
                 import time
                 time.sleep(1)
         
+        # 通知履歴更新フラグがあれば通知履歴を更新
+        if update_history:
+            self.update_notification_history(sales_info)
+            if self.debug:
+                print(f"Discord通知: {len(sales_info)}件のセール情報を履歴に追加しました")
+        
         return True
 
 def main():
@@ -265,9 +452,12 @@ def main():
     parser.add_argument('--output', type=str, help='出力テキストファイル名（.envファイルの設定を上書き、デフォルト: sales_output.txt）')
     parser.add_argument('--fetch-only', action='store_true', help='HTMLの取得のみを行う')
     parser.add_argument('--no-fetch', action='store_true', help='HTMLの取得をスキップして既存ファイルを解析')
+    parser.add_argument('--force-fetch', action='store_true', help='同じ日付のHTMLファイルが存在しても強制的に取得する')
     parser.add_argument('--shops', type=str, help='対象店舗のリスト（カンマ区切り）')
     parser.add_argument('--all-shops', action='store_true', help='全店舗を対象にする')
     parser.add_argument('--discord-webhook', type=str, help='Discord Webhook URL（.envファイルの設定を上書き）')
+    parser.add_argument('--history-file', type=str, help='通知履歴ファイルパス（デフォルト: ./data/notification_history.json）')
+    parser.add_argument('--force-notify', action='store_true', help='通知履歴を無視して強制的に通知する')
     parser.add_argument('--debug', action='store_true', help='デバッグモード（詳細情報を表示）')
     args = parser.parse_args()
     
@@ -290,17 +480,22 @@ def main():
     # デバッグモードの設定（コマンドラインオプション > 環境変数）
     debug_mode = args.debug or os.environ.get("DEBUG") == "1"
     
+    # 履歴ファイルパスの設定
+    history_file = args.history_file or os.environ.get("HISTORY_FILE") or "./data/notification_history.json"
+    
     # スクレイパーインスタンス
     scraper = KaldiSaleScraper(
         html_dir="./data",
         target_shops=target_shops,
         webhook_url=webhook_url,
-        debug=debug_mode
+        debug=debug_mode,
+        history_file=history_file
     )
     
     # no-fetchオプションが指定されていない場合はHTMLを取得
     if not args.no_fetch:
-        html_path = scraper.fetch_and_save_html(args.url)  # 引数なしの場合は自動生成URLを使用
+        # force-fetchオプションを渡して、同じ日付のHTMLが存在しても強制取得するかどうかを制御
+        html_path = scraper.fetch_and_save_html(args.url, force_fetch=args.force_fetch)
         if not html_path:
             print("HTMLの取得に失敗しました")
             return
@@ -311,21 +506,38 @@ def main():
     
     # セール情報を抽出
     sales_info = scraper.parse_html_files()
+    if not sales_info:
+        print("セール情報は見つかりませんでした")
+        return
+        
+    # 未通知のセール情報だけをフィルタリング（--force-notifyが指定されていない場合）
+    if not args.force_notify:
+        new_sales = scraper.filter_new_sales(sales_info)
+        if not new_sales:
+            print("新しいセール情報はありません。すべて既に通知済みです。")
+            return
+        sales_info = new_sales
+    else:
+        print(f"強制実行モード: 重複チェックをスキップします。{len(sales_info)}件のセール情報を処理します。")
     
     # 出力ファイル名の決定（優先順位: コマンドラインオプション > 環境変数 > デフォルト値）
     output_file = args.output or os.environ.get("OUTPUT_FILE") or "sales_output.txt"
     
-    if sales_info:
-        # テキストファイルに保存
-        scraper.save_to_text_file(sales_info, output_file)
-        print(f"{len(sales_info)}件のセール情報を{output_file}に保存しました")
-        
-        # Discord通知（--notifyオプションがある場合のみ）
-        if args.notify and webhook_url:
-            scraper.notify_discord(sales_info)
-            print(f"{len(sales_info)}件のセール情報をDiscordに通知しました")
-    else:
-        print("セール情報は見つかりませんでした")
+    # テキストファイルに保存
+    scraper.save_to_text_file(sales_info, output_file)
+    print(f"{len(sales_info)}件のセール情報を{output_file}に保存しました")
+    
+    # 履歴に追加（ファイル保存時に重複排除のため）
+    # --notify が指定されていない場合も履歴には追加する
+    if not args.force_notify:
+        scraper.update_notification_history(sales_info)
+        print(f"{len(sales_info)}件のセール情報を履歴に追加しました")
+    
+    # Discord通知（--notifyオプションがある場合のみ）
+    if args.notify and webhook_url:
+        # 履歴はすでに更新されているので、update_history=Falseを指定
+        scraper.notify_discord(sales_info, update_history=False)
+        print(f"{len(sales_info)}件のセール情報をDiscordに通知しました")
 
 if __name__ == "__main__":
     main()
