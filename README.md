@@ -320,3 +320,53 @@ tail -f /home/pi/cardi-sale/logs/cron.log
 7. プログラムに`pythonw`（バックグラウンド実行の場合）またはpython.exeのフルパスを指定
 8. 引数に`C:\path\to\cardi\src\scraper.py --notify`を指定
 9. 開始場所に`C:\path\to\cardi`を指定
+
+## 🐳 cardi-sale-scheduler Docker 起動手順（Flask + schedule）
+
+### 🔧 1. .env の準備
+
+```bash
+cp .env.example .env
+# エディタで開いて DISCORD_WEBHOOK_URL などを設定
+```
+
+### 🛠 2. Dockerfile & docker-compose.yml編集
+
+- 割愛
+
+### ▶️ 3. 起動
+
+```shell
+# 初回ビルド
+docker-compose build
+
+# バックグラウンドで起動
+docker-compose up -d
+```
+
+### ✅ 4. 動作確認
+
+```shell
+# Flaskサーバーにアクセス
+curl http://localhost:8000
+# → Cardi-sale scraper scheduler is running.
+
+# ログ確認
+docker logs -f cardi-sale-scheduler
+```
+
+### ⏹️ 5. 停止&再起動
+
+```shell
+# 停止
+docker-compose down
+
+# 再ビルド＆再起動
+docker-compose up -d --build
+```
+
+### 🧪 6. 手動通知テスト（即時実行）
+
+```shell
+docker-compose run --rm cardi-sale-scheduler python src/scraper.py --notify
+```
