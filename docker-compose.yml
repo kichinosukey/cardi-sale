@@ -1,0 +1,7 @@
+services:
+  cardi-sale-scheduler:
+    build: .
+    container_name: cardi-sale-scheduler
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
